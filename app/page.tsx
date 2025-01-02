@@ -3,14 +3,16 @@ import { redirect } from 'next/navigation';
 import { options } from './api/auth/[...nextauth]/options';
 import {readItems, refresh, withToken} from "@directus/sdk";
 import directus from "@/lib/directus";
+import {signOut} from "next-auth/react";
 
 export default async function Home() {
   const session = await getServerSession(options);
-  if (!session) {
-    redirect('/login');
-  }
-  await directus.request(refresh())
-  console.log('SESSION:', session)
+    if (!session || session.error === "RefreshAccessTokenError") {
+        redirect("/login");
+    }
+
+    console.log("SESSION:", session);
+
     const caseRecord = await directus.request(
         withToken(
             session.accessToken,
@@ -24,7 +26,7 @@ export default async function Home() {
   return (
       <main>
         <h1>
-          Welcome, {session.user.name}!
+          Welcome!
         </h1>
       </main>
   );

@@ -1,67 +1,106 @@
-import type {NextAuthOptions} from 'next-auth';
-import CredentialsProvider from 'next-auth/providers/credentials';
-import {Session} from 'next-auth';
-import directus from '@/lib/directus';
-import {readMe, withToken} from '@directus/sdk';
-import {JWT} from 'next-auth/jwt';
+import type { NextAuthOptions } from "next-auth";
+import CredentialsProvider from "next-auth/providers/credentials";
+import directus from "@/lib/directus";
+import {readMe, refresh, withToken} from "@directus/sdk";
+import { JWT } from "next-auth/jwt";
+import { Session } from "next-auth";
+
+const ACCESS_TOKEN_TTL = parseInt(process.env.ACCESS_TOKEN_TTL || "60000", 10); // 1 minute (in ms)
+const REFRESH_TOKEN_TTL = parseInt(process.env.REFRESH_TOKEN_TTL || "604800000", 10); // 7 days (in ms)
+
+async function refreshTokens(token: any) {
+  try {
+    console.log("Refreshing tokens with refresh token:", token.refreshToken);
+    const refreshedTokens = await directus.request(refresh("json", token.refreshToken));
+    console.log("Refreshed tokens:", refreshedTokens);
+
+    if (!refreshedTokens?.access_token) {
+      throw new Error("No access token returned by refresh.");
+    }
+
+    return {
+      ...token,
+      accessToken: refreshedTokens.access_token,
+      refreshToken: refreshedTokens.refresh_token || token, // Use old refreshToken if no new one
+      accessTokenExpires: Date.now() + ACCESS_TOKEN_TTL,
+      refreshTokenExpires: Date.now() + REFRESH_TOKEN_TTL,
+    };
+  } catch (error) {
+    return {
+      ...token,
+      error: "RefreshAccessTokenError",
+    }
+  }
+}
 
 export const options: NextAuthOptions = {
   providers: [
     CredentialsProvider({
-      // The name to display on the sign in form (e.g. "Sign in with...")
-      name: 'Credentials',
+      name: "Credentials",
       credentials: {
-        email: {},
-        password: {},
+        email: { label: "Email", type: "text" },
+        password: { label: "Password", type: "password" },
       },
       async authorize(credentials) {
-        if (!credentials) throw new Error('Email address or password is empty');
-        // Add logic here to look up the user from the credentials supplied
-        const user = await directus.login(credentials.email, credentials.password);
-        if (user) {
-          console.log(user)
-          return user as any;
-        } else {
-          throw new Error('Email address or password is invalid');
+        if (!credentials) throw new Error("Email address or password is empty");
+
+        const res = await fetch(process.env.DIRECTUS_URL+"/auth/login", {
+          method: "POST",
+          body: JSON.stringify(credentials),
+          headers: { "Content-Type": "application/json" },
+        });
+
+        const user = await res.json();
+
+        if (!res.ok || !user.data) {
+          throw new Error("Email address or password is invalid");
         }
+
+        return user;
       },
     }),
   ],
   secret: process.env.NEXTAUTH_SECRET,
   pages: {
-    signIn: '/login',
+    signIn: "/login",
   },
   callbacks: {
-    async jwt({
-                token,
-                user,
-                account,
-              }: {
-      token: JWT;
-      user: any;
-      account: any;
-    }) {
-      if (account && user) {
-        const userData = await directus.request(
-            withToken(
-                user.access_token as string,
-                readMe({
-                  fields: ['id', 'first_name', 'last_name'],
-                })
-            )
-        );
+    async jwt({ token, user }: { token: JWT; user: any; }) {
+      // Initial sign-in
+      if (user) {
         return {
-          ...token,
-          accessToken: user.access_token,
-          user: userData,
-        };
+          accessToken: user.data.access_token,
+          refreshToken: user.data.refresh_token,
+          accessTokenExpires: Date.now() + ACCESS_TOKEN_TTL,
+          refreshTokenExpires: Date.now() + REFRESH_TOKEN_TTL,
+          userState: user.data, // Initial user data
+        }
       }
-      return token;
+
+      // Check if access token is expired
+      // @ts-ignore
+      if (Date.now() < token.accessTokenExpires) {
+        console.log("**** returning previous token ******");
+        return token;
+      }
+
+      // Access token has expired, try to update it
+      console.log("**** Update Refresh token ******");
+      //return token;
+      return refreshTokens(token);
     },
-    async session({session, token}: { session: Session; token: any }) {
+    async session({ session, token }: { session: Session; token: any }) {
       session.accessToken = token.accessToken;
-      session.user = token.user;
+      session.refreshToken = token.refreshToken;
+      session.expiresIn = token.accessTokenExpires;
+      session.error = token.error;
+
+      if (token.error === "RefreshTokenError") {
+        console.error("Session refresh failed. User needs to reauthenticate.");
+      }
+
       return session;
-    },
+    }
+
   },
 };
